@@ -831,8 +831,11 @@ int axnpu_run(struct axnpu_model *m, int timeout_ms)
 		uint32_t count, i;
 
 		memcpy(wait + 0x58, &timeout, sizeof(timeout));
-		if (ioctl(m->fd, NPU_WAIT_TASKS0, wait))
+		if (ioctl(m->fd, NPU_WAIT_TASKS0, wait)) {
+			if (errno == EINTR)
+				continue;
 			return -errno;
+		}
 		memcpy(&count, wait + 0x50, sizeof(count));
 		for (i = 0; i < count && i < 4; i++) {
 			memcpy(&record, wait + i * sizeof(record), sizeof(record));
