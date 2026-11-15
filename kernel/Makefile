@@ -2,9 +2,8 @@
 #
 # The AX620E NPU driver, built out of tree against a configured kernel:
 #   make KDIR=<kernel build directory> ARCH=arm CROSS_COMPILE=<prefix>
-# Buildroot's kernel-module infrastructure builds it the same way.
-
-obj-m := ax620e-npu.o
+# Kbuild reads the Kbuild file; Buildroot's kernel-module infrastructure
+# builds it the same way.
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
@@ -16,3 +15,5 @@ modules_install:
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+
+.PHONY: all modules_install clean
