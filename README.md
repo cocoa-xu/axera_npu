@@ -54,7 +54,7 @@ In a Nerves application:
 ```elixir
 def deps do
   [
-    {:axera_npu, github: "cocoa-xu/axera_npu"},
+    {:axera_npu, github: "cocoa-xu/axera_npu", tag: "v0.1.0"},
     # optional, for Nx tensors in and out
     {:nx, "~> 0.9"}
   ]
