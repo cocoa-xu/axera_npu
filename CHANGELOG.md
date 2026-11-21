@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.0 (2026-11-21)
 
 * The `ax620e-npu` driver: `/dev/npu` with the vendor's interface (models,
   tasks, waiting for them), memory from the device tree's pool, uncached or
