@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+* `models/ppocrv5`: compiling PP-OCRv5 for `AxeraNPU.OCR` with Pulsar2 4.2,
+  text detection at 640 x 640 and recognition, both taking u8 RGB: a screen
+  page of six lines in about half a second on the NanoKVM-Go+
+
 ## v0.1.0 (2026-11-21)
 
 * The `ax620e-npu` driver: `/dev/npu` with the vendor's interface (models,

@@ -1,0 +1,69 @@
+{
+  "input": "./onnx/det_640.onnx",
+  "output_dir": "./out/det640_u8",
+  "output_name": "det.axmodel",
+  "model_type": "ONNX",
+  "target_hardware": "AX620E",
+  "npu_mode": "NPU2",
+  "onnx_opt": {
+    "disable_onnx_optimization": false,
+    "enable_onnxsim": false,
+    "model_check": false,
+    "disable_transformation_check": false
+  },
+  "quant": {
+    "input_configs": [
+      {
+        "tensor_name": "x",
+        "calibration_dataset": "./ocr_pic.tar.gz",
+        "calibration_size": -1,
+        "calibration_mean": [
+          123.675,
+          116.28,
+          103.53
+        ],
+        "calibration_std": [
+          58.395,
+          57.12,
+          57.375
+        ]
+      }
+    ],
+    "calibration_method": "MinMax",
+    "precision_analysis": false,
+    "layer_configs": [
+      {
+        "start_tensor_names": [
+          "DEFAULT"
+        ],
+        "end_tensor_names": [
+          "DEFAULT"
+        ],
+        "data_type": "U8"
+      }
+    ]
+  },
+  "input_processors": [
+    {
+      "tensor_name": "x",
+      "tensor_format": "BGR",
+      "tensor_layout": "NCHW",
+      "src_format": "RGB",
+      "src_dtype": "U8",
+      "src_layout": "NHWC",
+      "mean": [
+        123.675,
+        116.28,
+        103.53
+      ],
+      "std": [
+        58.395,
+        57.12,
+        57.375
+      ]
+    }
+  ],
+  "compiler": {
+    "check": 0
+  }
+}

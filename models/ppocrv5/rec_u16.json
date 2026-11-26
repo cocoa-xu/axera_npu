@@ -1,0 +1,70 @@
+{
+  "input": "./onnx/rec_mobile_sim_static.onnx",
+  "output_dir": "./out/rec_u16",
+  "output_name": "rec.axmodel",
+  "model_type": "ONNX",
+  "target_hardware": "AX620E",
+  "npu_mode": "NPU2",
+  "onnx_opt": {
+    "disable_onnx_optimization": false,
+    "enable_onnxsim": false,
+    "model_check": false,
+    "disable_transformation_check": false
+  },
+  "quant": {
+    "input_configs": [
+      {
+        "tensor_name": "x",
+        "calibration_dataset": "./rec_pic.tar.gz",
+        "calibration_format": "Image",
+        "calibration_size": -1,
+        "calibration_mean": [
+          127.5,
+          127.5,
+          127.5
+        ],
+        "calibration_std": [
+          127.5,
+          127.5,
+          127.5
+        ]
+      }
+    ],
+    "calibration_method": "MinMax",
+    "precision_analysis": false,
+    "layer_configs": [
+      {
+        "start_tensor_names": [
+          "DEFAULT"
+        ],
+        "end_tensor_names": [
+          "DEFAULT"
+        ],
+        "data_type": "U16"
+      }
+    ]
+  },
+  "input_processors": [
+    {
+      "tensor_name": "x",
+      "tensor_format": "BGR",
+      "tensor_layout": "NCHW",
+      "src_format": "RGB",
+      "src_dtype": "U8",
+      "src_layout": "NHWC",
+      "mean": [
+        127.5,
+        127.5,
+        127.5
+      ],
+      "std": [
+        127.5,
+        127.5,
+        127.5
+      ]
+    }
+  ],
+  "compiler": {
+    "check": 0
+  }
+}
