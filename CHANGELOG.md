@@ -5,6 +5,12 @@
 * `models/ppocrv5`: compiling PP-OCRv5 for `AxeraNPU.OCR` with Pulsar2 4.2,
   text detection at 640 x 640 and recognition, both taking u8 RGB: a screen
   page of six lines in about half a second on the NanoKVM-Go+
+* The driver loads programs and submits tasks with 64-bit user pointers
+  (`NPU_PROGRAM_LOAD`, `NPU_TASK_SUBMIT`), which the vendor's interface lacks,
+  and serves 32-bit processes on a 64-bit kernel too. The runtime uses them,
+  so it runs in 64-bit processes and needs this driver
+* The driver reads a task's id before another thread may have run and freed
+  the task
 
 ## v0.1.0 (2026-11-21)
 
