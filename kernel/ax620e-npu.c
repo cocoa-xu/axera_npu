@@ -5,7 +5,9 @@
  * /dev/npu with the interface of the vendor's ax_npu.ko V3.0.0, so that the
  * vendor's NPU runtime (libax_engine.so, libax_interpreter.so) runs as it
  * is, plus ioctls of our own that hand out DMA memory to an open
- * libax_sys.so: uncached, or cached with explicit cache maintenance.
+ * libax_sys.so: uncached, or cached with explicit cache maintenance, and
+ * that load programs and submit tasks with 64-bit user pointers, which the
+ * vendor's interface lacks.
  *
  * The NPU runs a command stream the vendor's compiler made: the driver
  * copies it into DMA memory, writes the addresses of the task's buffers into
@@ -125,6 +127,24 @@ struct npu_mem {
 #define NPU_MEM_ALLOC		_IOWR('n', 0x40, struct npu_mem)
 #define NPU_MEM_FREE		_IOW('n', 0x41, struct npu_mem)
 #define NPU_MEM_SYNC		_IOW('n', 0x42, struct npu_mem)
+
+/* Ours: the same in 32-bit and 64-bit processes. */
+struct npu_program {
+	__u64 data;		/* the .neu program */
+	__u32 size;
+	__u32 handle;		/* out */
+};
+
+struct npu_submit {
+	__u64 phys;		/* __u64[count]: the program's IO, in its order */
+	__u32 handle;
+	__u32 count;
+	__u32 task;		/* out */
+	__u32 reserved;
+};
+
+#define NPU_PROGRAM_LOAD	_IOWR('n', 0x43, struct npu_program)
+#define NPU_TASK_SUBMIT		_IOWR('n', 0x44, struct npu_submit)
 
 #define NPU_DISTRIBUTION_ONE	0xaa55
 #define NPU_MAX_MODEL		(64 << 20)
@@ -284,7 +304,7 @@ static void npu_hw_init(struct npu_dev *npu)
 
 	npu_w(npu, NPU_GLB + G_RST_DEASSERT, 0xfff);
 	npu_w(npu, NPU_GLB + G_EB0_CLR, BIT(2));
-	npu_w(npu, NPU_GLB + G_EB0_SET, ~BIT(2));
+	npu_w(npu, NPU_GLB + G_EB0_SET, ~(u32)BIT(2));
 	npu_w(npu, NPU_GLB + G_EB1_CLR, 0x311);
 	npu_w(npu, NPU_GLB + G_EB1_SET, ~0x311);
 	npu_w(npu, NPU_GLB + G_AUTO_GATE, npu_r(npu, NPU_GLB + G_AUTO_GATE) & ~3);
@@ -755,32 +775,31 @@ static int npu_ensure_ring(struct npu_dev *npu, size_t size)
 	return 0;
 }
 
-static int npu_create_handle(struct npu_dev *npu, struct file *file, void __user *arg)
+/* Takes a program (a .neu blob) in: the model's handle, or an error. */
+static int npu_load_program(struct npu_dev *npu, struct file *file, const void __user *data,
+			    u32 size)
 {
-	struct { u32 data, size, handle, attr, name, name_len; } req;
 	struct npu_model *model;
 	struct fb fb;
 	void *blob;
 	int ret, id;
 
-	if (copy_from_user(&req, arg, sizeof(req)))
-		return -EFAULT;
-	if (!req.size || req.size > NPU_MAX_MODEL)
+	if (!size || size > NPU_MAX_MODEL)
 		return -EINVAL;
 
-	blob = vmalloc(req.size);
+	blob = vmalloc(size);
 	model = kzalloc(sizeof(*model), GFP_KERNEL);
 	if (!blob || !model) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	if (copy_from_user(blob, npu_uptr(req.data), req.size)) {
+	if (copy_from_user(blob, data, size)) {
 		ret = -EFAULT;
 		goto out;
 	}
 
 	fb.buf = blob;
-	fb.len = req.size;
+	fb.len = size;
 	model->owner = file;
 	ret = npu_parse_model(npu, model, &fb);
 	if (ret) {
@@ -797,18 +816,10 @@ static int npu_create_handle(struct npu_dev *npu, struct file *file, void __user
 		goto out;
 	}
 
-	if (put_user(id, (u32 __user *)npu_uptr(req.handle))) {
-		mutex_lock(&npu->lock);
-		idr_remove(&npu->models, id);
-		mutex_unlock(&npu->lock);
-		ret = -EFAULT;
-		goto out;
-	}
-
 	dev_dbg(npu->dev, "Model %d: mcode %zu bytes, %u IO, %u params, ring %u\n", id,
 		model->mcode_size, model->nio, model->nparams, model->ring_size);
 	vfree(blob);
-	return 0;
+	return id;
 
 out:
 	if (model)
@@ -832,6 +843,41 @@ static int npu_destroy_handle(struct npu_dev *npu, struct file *file, u32 handle
 	if (!model)
 		return -EINVAL;
 	npu_free_model(npu, model);
+	return 0;
+}
+
+static int npu_create_handle(struct npu_dev *npu, struct file *file, void __user *arg)
+{
+	struct { u32 data, size, handle, attr, name, name_len; } req;
+	int id;
+
+	if (copy_from_user(&req, arg, sizeof(req)))
+		return -EFAULT;
+	id = npu_load_program(npu, file, npu_uptr(req.data), req.size);
+	if (id < 0)
+		return id;
+	if (put_user(id, (u32 __user *)npu_uptr(req.handle))) {
+		npu_destroy_handle(npu, file, id);
+		return -EFAULT;
+	}
+	return 0;
+}
+
+static int npu_program_load(struct npu_dev *npu, struct file *file,
+			    struct npu_program __user *arg)
+{
+	struct npu_program req;
+	int id;
+
+	if (copy_from_user(&req, arg, sizeof(req)))
+		return -EFAULT;
+	id = npu_load_program(npu, file, u64_to_user_ptr(req.data), req.size);
+	if (id < 0)
+		return id;
+	if (put_user(id, &arg->handle)) {
+		npu_destroy_handle(npu, file, id);
+		return -EFAULT;
+	}
 	return 0;
 }
 
@@ -1004,51 +1050,95 @@ static int npu_mmap(struct file *file, struct vm_area_struct *vma)
 
 /* ---- Tasks */
 
+/*
+ * Queues a run of a model with the physical addresses of its IO, in the
+ * program's order. The task holds the caller's reference to the file.
+ */
+static int npu_queue_task(struct npu_dev *npu, struct file *file, u32 handle, const u64 *phys,
+			  unsigned int count, u32 callback, u32 context, u32 *id)
+{
+	struct npu_model *model;
+	struct npu_task *task;
+	unsigned int nio;
+
+	mutex_lock(&npu->lock);
+	model = idr_find(&npu->models, handle);
+	nio = model ? model->nio : 0;
+	mutex_unlock(&npu->lock);
+	if (!model || count < nio || count > NPU_MAX_IO)
+		return -EINVAL;
+
+	task = kzalloc(sizeof(*task), GFP_KERNEL);
+	if (!task)
+		return -ENOMEM;
+	memcpy(task->phys, phys, nio * sizeof(*phys));
+	task->owner = file;
+	task->handle = handle;
+	task->callback = callback;
+	task->context = context;
+
+	/* Once queued, the task may run and be freed at any time. */
+	spin_lock(&npu->tasks_lock);
+	*id = task->id = ++npu->next_task;
+	list_add_tail(&task->node, &npu->tasks);
+	spin_unlock(&npu->tasks_lock);
+
+	wake_up(&npu->tasks_wait);
+	return 0;
+}
+
 static int npu_create_task(struct npu_dev *npu, struct file *file, void __user *arg)
 {
 	struct { u32 info, size; } req;
 	struct { u32 handle, io, io_start, ext, task_out, callback, context; } info;
 	struct { u32 buffers, count; } io;
 	struct { u64 phys; u32 virt, size; } buf;
-	struct npu_model *model;
-	struct npu_task *task;
-	unsigned int i, nio;
+	u64 phys[NPU_MAX_IO];
+	unsigned int i;
+	u32 id;
+	int ret;
 
 	if (copy_from_user(&req, arg, sizeof(req)) ||
 	    copy_from_user(&info, npu_uptr(req.info), sizeof(info)) ||
 	    copy_from_user(&io, npu_uptr(info.io), sizeof(io)))
 		return -EFAULT;
-
-	mutex_lock(&npu->lock);
-	model = idr_find(&npu->models, info.handle);
-	nio = model ? model->nio : 0;
-	mutex_unlock(&npu->lock);
-	if (!model || io.count < nio || io.count > NPU_MAX_IO)
+	if (io.count > NPU_MAX_IO)
 		return -EINVAL;
-
-	task = kzalloc(sizeof(*task), GFP_KERNEL);
-	if (!task)
-		return -ENOMEM;
-	for (i = 0; i < nio; i++) {
-		if (copy_from_user(&buf, npu_uptr(io.buffers) + i * sizeof(buf), sizeof(buf))) {
-			kfree(task);
+	for (i = 0; i < io.count; i++) {
+		if (copy_from_user(&buf, npu_uptr(io.buffers) + i * sizeof(buf), sizeof(buf)))
 			return -EFAULT;
-		}
-		task->phys[i] = buf.phys;
+		phys[i] = buf.phys;
 	}
-	task->owner = file;
-	task->handle = info.handle;
-	task->callback = info.callback;
-	task->context = info.context;
 
-	spin_lock(&npu->tasks_lock);
-	task->id = ++npu->next_task;
-	list_add_tail(&task->node, &npu->tasks);
-	spin_unlock(&npu->tasks_lock);
-
-	if (info.task_out && put_user(task->id, (u32 __user *)npu_uptr(info.task_out)))
+	ret = npu_queue_task(npu, file, info.handle, phys, io.count, info.callback, info.context,
+			     &id);
+	if (ret)
+		return ret;
+	if (info.task_out && put_user(id, (u32 __user *)npu_uptr(info.task_out)))
 		dev_dbg(npu->dev, "Task id not written back\n");
-	wake_up(&npu->tasks_wait);
+	return 0;
+}
+
+static int npu_task_submit(struct npu_dev *npu, struct file *file, struct npu_submit __user *arg)
+{
+	struct npu_submit req;
+	u64 phys[NPU_MAX_IO];
+	u32 id;
+	int ret;
+
+	if (copy_from_user(&req, arg, sizeof(req)))
+		return -EFAULT;
+	if (req.count > NPU_MAX_IO)
+		return -EINVAL;
+	if (copy_from_user(phys, u64_to_user_ptr(req.phys), req.count * sizeof(phys[0])) ||
+	    put_user(0, &arg->task))
+		return -EFAULT;
+
+	ret = npu_queue_task(npu, file, req.handle, phys, req.count, 0, 0, &id);
+	if (ret)
+		return ret;
+	if (put_user(id, &arg->task))
+		dev_dbg(npu->dev, "Task id not written back\n");
 	return 0;
 }
 
@@ -1324,6 +1414,14 @@ static long npu_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (ret)
 			fput(file);
 		return ret;
+	case NPU_PROGRAM_LOAD:
+		return npu_program_load(npu, file, uarg);
+	case NPU_TASK_SUBMIT:
+		get_file(file);
+		ret = npu_task_submit(npu, file, uarg);
+		if (ret)
+			fput(file);
+		return ret;
 	case NPU_WAIT_TASKS0:
 	case NPU_WAIT_TASKS1:
 		return npu_wait_tasks(client, uarg);
@@ -1351,6 +1449,7 @@ static const struct file_operations npu_fops = {
 	.open = npu_open,
 	.release = npu_release,
 	.unlocked_ioctl = npu_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
 	.mmap = npu_mmap,
 };
 
