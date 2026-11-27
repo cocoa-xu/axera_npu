@@ -23,11 +23,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* ---- /dev/npu: the vendor's interface plus the open driver's memory */
+/* ---- /dev/npu: the vendor's interface plus the open driver's own */
 
 #define NPU_INIT		0xc0046e00
-#define NPU_CREATE_HANDLE	0xc0046e02
-#define NPU_CREATE_TASK		0xc0046e03
 #define NPU_WAIT_TASKS0		0xc0046e0e
 #define NPU_DISTRIBUTION_ONE	0xaa55
 
@@ -40,16 +38,27 @@ struct npu_mem {
 #define NPU_MEM_CACHED		1
 #define NPU_MEM_ALLOC		_IOWR('n', 0x40, struct npu_mem)
 
+/* A program and a task: 64-bit pointers, unlike the vendor's interface. */
+struct npu_program {
+	uint64_t data;
+	uint32_t size;
+	uint32_t handle;
+};
+
+struct npu_submit {
+	uint64_t phys;
+	uint32_t handle;
+	uint32_t count;
+	uint32_t task;
+	uint32_t reserved;
+};
+
+#define NPU_PROGRAM_LOAD	_IOWR('n', 0x43, struct npu_program)
+#define NPU_TASK_SUBMIT		_IOWR('n', 0x44, struct npu_submit)
+
 /* A finished task as the waiting ioctl returns it. */
 struct npu_record {
 	uint32_t task, unknown, result, callback, context;
-};
-
-/* A task's buffer: what the driver reads per tensor. */
-struct npu_task_buffer {
-	uint64_t phys;
-	uint32_t virt;
-	uint32_t size;
 };
 
 #define MAX_TENSORS 16
@@ -79,7 +88,7 @@ struct axnpu_model {
 	struct buffer in_buf[MAX_TENSORS], out_buf[MAX_TENSORS], consts[MAX_TENSORS], zeros;
 	char const_names[MAX_TENSORS][64];
 	struct slot slots[MAX_TASK];
-	struct npu_task_buffer task[MAX_TASK];
+	uint64_t task[MAX_TASK];	/* each tensor's physical address */
 };
 
 static int fail(char *err, size_t size, const char *format, ...)
@@ -666,7 +675,10 @@ static int plan(struct axnpu_model *m, const struct parts *parts, char *err, siz
 static int attach(struct axnpu_model *m, const struct parts *parts, char *err, size_t err_size)
 {
 	uint32_t attr[5] = { NPU_DISTRIBUTION_ONE };
-	uint32_t create[6];
+	struct npu_program program = {
+		.data = (uintptr_t)parts->neu.p,
+		.size = (uint32_t)(parts->neu.end - parts->neu.p),
+	};
 	int i;
 
 	m->fd = open("/dev/npu", O_RDWR | O_CLOEXEC);
@@ -703,17 +715,12 @@ static int attach(struct axnpu_model *m, const struct parts *parts, char *err, s
 					 s->source == FROM_CONST ? &m->consts[s->index] : &m->zeros;
 		size_t offset = s->source == FROM_ZEROS ? (size_t)s->index * OFFSET_STRIDE : 0;
 
-		m->task[i].phys = b->phys + offset;
-		m->task[i].virt = (uint32_t)(uintptr_t)((uint8_t *)b->virt + offset);
-		m->task[i].size = s->size;
+		m->task[i] = b->phys + offset;
 	}
 
-	create[0] = (uint32_t)(uintptr_t)parts->neu.p;
-	create[1] = (uint32_t)(parts->neu.end - parts->neu.p);
-	create[2] = (uint32_t)(uintptr_t)&m->handle;
-	create[3] = create[4] = create[5] = 0;
-	if (ioctl(m->fd, NPU_CREATE_HANDLE, create))
+	if (ioctl(m->fd, NPU_PROGRAM_LOAD, &program))
 		return fail(err, err_size, "the driver did not take the program: %s", strerror(errno));
+	m->handle = program.handle;
 	return 0;
 }
 
@@ -813,17 +820,16 @@ struct axnpu_tensor *axnpu_output(struct axnpu_model *model, int index)
 
 int axnpu_run(struct axnpu_model *m, int timeout_ms)
 {
-	struct { uint32_t buffers, count; } io = { (uint32_t)(uintptr_t)m->task, (uint32_t)m->nslots };
-	uint32_t id = 0;
-	struct { uint32_t handle, io, io_start, ext, task_out, callback, context; } info = {
-		m->handle, (uint32_t)(uintptr_t)&io, (uint32_t)m->nslots, 0, (uint32_t)(uintptr_t)&id, 0, 0,
+	struct npu_submit submit = {
+		.phys = (uintptr_t)m->task,
+		.handle = m->handle,
+		.count = (uint32_t)m->nslots,
 	};
-	struct { uint32_t info, size; } request = { (uint32_t)(uintptr_t)&info, sizeof(info) };
 	uint64_t timeout = timeout_ms > 0 ? (uint64_t)timeout_ms : 5000;
 
 	if (m->fd < 0)
 		return -ENODEV;
-	if (ioctl(m->fd, NPU_CREATE_TASK, &request))
+	if (ioctl(m->fd, NPU_TASK_SUBMIT, &submit))
 		return -errno;
 	for (;;) {
 		uint8_t wait[0x60] = { 0 };
@@ -839,7 +845,7 @@ int axnpu_run(struct axnpu_model *m, int timeout_ms)
 		memcpy(&count, wait + 0x50, sizeof(count));
 		for (i = 0; i < count && i < 4; i++) {
 			memcpy(&record, wait + i * sizeof(record), sizeof(record));
-			if (record.task == id)
+			if (record.task == submit.task)
 				return record.result ? -EIO : 0;
 		}
 	}
