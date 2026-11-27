@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-11-28)
 
 * `models/ppocrv5`: compiling PP-OCRv5 for `AxeraNPU.OCR` with Pulsar2 4.2,
   text detection at 640 x 640 and recognition, both taking u8 RGB: a screen
